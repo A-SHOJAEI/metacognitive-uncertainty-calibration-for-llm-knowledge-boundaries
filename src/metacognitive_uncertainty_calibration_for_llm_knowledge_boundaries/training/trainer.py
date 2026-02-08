@@ -93,7 +93,7 @@ class MetacognitiveTrainer:
         param_groups = [
             {
                 "params": self.model.base_model.parameters(),
-                "lr": base_lr * 0.1,  # Lower LR for pre-trained components
+                "lr": base_lr * 0.5,  # Moderate LR for pre-trained components
                 "weight_decay": self.config.get("weight_decay", 0.01)
             },
             {
@@ -143,20 +143,25 @@ class MetacognitiveTrainer:
 
     def _setup_mlflow(self) -> None:
         """Setup MLflow experiment tracking."""
-        mlflow.set_experiment(self.experiment_name)
+        self.mlflow_active = False
+        try:
+            mlflow.set_experiment(self.experiment_name)
 
-        # Start new run
-        mlflow.start_run()
+            # Start new run
+            mlflow.start_run()
 
-        # Log configuration
-        mlflow.log_params(self.config)
+            # Log configuration
+            mlflow.log_params(self.config)
 
-        # Log model info
-        model_info = self.model.get_model_info()
-        for key, value in model_info.items():
-            mlflow.log_param(f"model_{key}", value)
+            # Log model info
+            model_info = self.model.get_model_info()
+            for key, value in model_info.items():
+                mlflow.log_param(f"model_{key}", value)
 
-        logger.info(f"Started MLflow run: {mlflow.active_run().info.run_id}")
+            self.mlflow_active = True
+            logger.info(f"Started MLflow run: {mlflow.active_run().info.run_id}")
+        except Exception as e:
+            logger.warning(f"MLflow setup failed: {e}. Training will continue without MLflow.")
 
     def train(self, num_epochs: Optional[int] = None) -> Dict[str, List[float]]:
         """
@@ -193,7 +198,11 @@ class MetacognitiveTrainer:
             self.training_history.append(epoch_metrics)
 
             # Log to MLflow
-            mlflow.log_metrics(epoch_metrics, step=epoch)
+            if self.mlflow_active:
+                try:
+                    mlflow.log_metrics(epoch_metrics, step=epoch)
+                except Exception:
+                    pass
 
             # Early stopping check
             if val_metrics["val_loss"] < self.best_val_loss:
@@ -377,12 +386,16 @@ class MetacognitiveTrainer:
 
             # Log intermediate metrics
             if self.global_step % self.config.get("log_every", 100) == 0:
-                mlflow.log_metrics({
-                    "step_train_loss": loss.item(),
-                    "step_answer_loss": losses["answer_loss"].item(),
-                    "step_uncertainty_loss": losses["uncertainty_loss"].item(),
-                    "learning_rate": self.optimizer.param_groups[0]["lr"]
-                }, step=self.global_step)
+                if self.mlflow_active:
+                    try:
+                        mlflow.log_metrics({
+                            "step_train_loss": loss.item(),
+                            "step_answer_loss": losses["answer_loss"].item(),
+                            "step_uncertainty_loss": losses["uncertainty_loss"].item(),
+                            "learning_rate": self.optimizer.param_groups[0]["lr"]
+                        }, step=self.global_step)
+                    except Exception:
+                        pass
 
         # Calculate epoch metrics
         num_processed_batches = len(self.train_loader)
@@ -591,7 +604,11 @@ class MetacognitiveTrainer:
 
         # Log final metrics
         final_metrics = {f"final_{k}": v for k, v in final_metrics.items()}
-        mlflow.log_metrics(final_metrics)
+        if self.mlflow_active:
+            try:
+                mlflow.log_metrics(final_metrics)
+            except Exception:
+                pass
 
         # Domain-specific analysis
         if all_domains:
@@ -602,9 +619,13 @@ class MetacognitiveTrainer:
                 all_domains
             )
 
-            for domain, metrics in domain_metrics.items():
-                domain_metrics_prefixed = {f"final_{domain}_{k}": v for k, v in metrics.items()}
-                mlflow.log_metrics(domain_metrics_prefixed)
+            if self.mlflow_active:
+                try:
+                    for domain, metrics in domain_metrics.items():
+                        domain_metrics_prefixed = {f"final_{domain}_{k}": v for k, v in metrics.items()}
+                        mlflow.log_metrics(domain_metrics_prefixed)
+                except Exception:
+                    pass
 
         logger.info("Final evaluation completed")
 
@@ -629,7 +650,11 @@ class MetacognitiveTrainer:
         if is_best:
             best_path = self.checkpoint_dir / "best_model.pt"
             torch.save(checkpoint, best_path)
-            mlflow.log_artifact(str(best_path))
+            if self.mlflow_active:
+                try:
+                    mlflow.log_artifact(str(best_path))
+                except Exception:
+                    pass
 
         logger.info(f"Saved checkpoint: {checkpoint_path}")
 
@@ -709,5 +734,9 @@ class MetacognitiveTrainer:
 
     def close(self) -> None:
         """Clean up MLflow run."""
-        mlflow.end_run()
+        if self.mlflow_active:
+            try:
+                mlflow.end_run()
+            except Exception:
+                pass
         logger.info("Training session closed")

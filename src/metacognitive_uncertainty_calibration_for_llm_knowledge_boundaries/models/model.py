@@ -159,7 +159,7 @@ class UncertaintyHead(nn.Module):
             pooled = (hidden_states * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
         else:
             pooled = hidden_states.mean(dim=1)
-        pooled = torch.nan_to_num(pooled, nan=0.0, posinf=1e4, neginf=-1e4)
+        pooled = torch.clamp(pooled, min=-1e4, max=1e4)
 
         # Predict uncertainty type
         uncertainty_logits = self.uncertainty_classifier(pooled)
@@ -261,7 +261,7 @@ class MetacognitiveUncertaintyModel(nn.Module):
 
     def __init__(
         self,
-        base_model_name: str = "microsoft/DialoGPT-medium",
+        base_model_name: str = "gpt2-medium",
         num_choices: int = 4,
         uncertainty_weight: float = 0.3,
         explanation_weight: float = 0.2,
@@ -323,8 +323,7 @@ class MetacognitiveUncertaintyModel(nn.Module):
                 num_samples=DEFAULT_EPISTEMIC_SAMPLES
             )
 
-        # Domain embedding for knowledge boundary detection
-        self.domain_embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        # Domain embedding is used at inference time only (loaded on demand)
 
         logger.info(f"Initialized MetacognitiveUncertaintyModel with {base_model_name}")
 
@@ -481,9 +480,8 @@ class MetacognitiveUncertaintyModel(nn.Module):
             else:
                 pooled_output = hidden_states.mean(dim=1)
 
-            # Clamp to prevent NaN/Inf propagation
+            # Clamp to prevent extreme values
             pooled_output = torch.clamp(pooled_output, min=-1e4, max=1e4)
-            pooled_output = torch.nan_to_num(pooled_output, nan=0.0, posinf=1e4, neginf=-1e4)
 
         except Exception as e:
             logger.error(f"Base model forward pass failed: {e}", exc_info=True)
@@ -500,8 +498,7 @@ class MetacognitiveUncertaintyModel(nn.Module):
                     f"expected ({batch_size}, {self.num_choices})"
                 )
 
-            # Clamp answer logits for numerical stability instead of crashing
-            answer_logits = torch.nan_to_num(answer_logits, nan=0.0, posinf=1e4, neginf=-1e4)
+            # Clamp answer logits for numerical stability
             answer_logits = torch.clamp(answer_logits, min=-100, max=100)
 
             answer_probs = F.softmax(answer_logits, dim=-1)
@@ -527,7 +524,6 @@ class MetacognitiveUncertaintyModel(nn.Module):
             uncertainty_confidence = uncertainty_outputs["confidence"]
 
             # Clamp uncertainty logits for numerical stability
-            uncertainty_logits = torch.nan_to_num(uncertainty_logits, nan=0.0, posinf=100, neginf=-100)
             uncertainty_logits = torch.clamp(uncertainty_logits, min=-100, max=100)
 
             # Get uncertainty type predictions with bounds checking
@@ -902,14 +898,15 @@ class MetacognitiveUncertaintyModel(nn.Module):
             logits_list = []
             labels_list = []
 
+            device = next(self.parameters()).device
             with torch.no_grad():
                 for batch in validation_loader:
                     outputs = self.forward(
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch["attention_mask"]
+                        input_ids=batch["input_ids"].to(device),
+                        attention_mask=batch["attention_mask"].to(device)
                     )
                     logits_list.append(outputs.answer_logits)
-                    labels_list.append(batch["answer_labels"])
+                    labels_list.append(batch["answer_labels"].to(device))
 
             logits = torch.cat(logits_list, dim=0)
             labels = torch.cat(labels_list, dim=0)
